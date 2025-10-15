@@ -1,16 +1,30 @@
-name: Playwright Tests
+name: Playwright Tests - Advanced
 
 on:
   push:
     branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
+  schedule:
+    # Run tests every day at 2 AM UTC
+    - cron: '0 2 * * *'
   workflow_dispatch:
+    inputs:
+      browser:
+        description: 'Browser to test'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - chromium
+          - firefox
+          - webkit
 
 jobs:
-  test:
+  # Quick smoke tests
+  smoke-tests:
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -22,8 +36,57 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Run tests (browsers install automatically on first run)
-        run: mvn clean test -Dheadless=true -DargLine=""
+      - name: Install Playwright system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwoff1 libvpx9 libevent-2.1-7t64 libopus0 \
+            libgstreamer-plugins-base1.0-0 libgstreamer-gl1.0-0 \
+            libgstreamer-plugins-bad1.0-0 libflite1 libavif16 \
+            libharfbuzz-icu0 libsecret-1-0 libhyphen0 \
+            libmanette-0.2-0 libgles2 gstreamer1.0-libav
+
+      - name: Run smoke tests (browsers install automatically)
+        run: mvn clean test -P smoke -Dheadless=true -DargLine=""
+
+  # Full test suite with matrix
+  full-tests:
+    needs: smoke-tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        java: ['17', '21']
+        exclude:
+          # Exclude unnecessary combinations
+          - os: macos-latest
+            java: '21'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Install Playwright system dependencies (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwoff1 libvpx9 libevent-2.1-7t64 libopus0 \
+            libgstreamer-plugins-base1.0-0 libgstreamer-gl1.0-0 \
+            libgstreamer-plugins-bad1.0-0 libflite1 libavif16 \
+            libharfbuzz-icu0 libsecret-1-0 libhyphen0 \
+            libmanette-0.2-0 libgles2 gstreamer1.0-libav
+
+      - name: Run tests (Parallel) - browsers install automatically
+        run: mvn clean test -P parallel,ci -Dheadless=true -DargLine=""
         continue-on-error: true
 
       - name: Generate Allure report
@@ -34,7 +97,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: allure-results
+          name: allure-results-${{ matrix.os }}-java${{ matrix.java }}
           path: target/allure-results
           retention-days: 30
 
@@ -42,23 +105,158 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: allure-report
+          name: allure-report-${{ matrix.os }}-java${{ matrix.java }}
           path: target/site/allure-maven-plugin
           retention-days: 30
 
-      - name: Upload screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: screenshots
-          path: target/allure-results/*.png
-          retention-days: 30
-          if-no-files-found: ignore
+  # Merge reports from all matrix jobs
+  merge-reports:
+    needs: full-tests
+    runs-on: ubuntu-latest
+    if: always()
 
-      - name: Publish Allure Report to GitHub Pages
-        if: always() && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge Allure results
+        run: |
+          mkdir -p target/allure-results
+          find artifacts -name "allure-results-*" -type d -exec cp -r {}/* target/allure-results/ \;
+
+      - name: Load history
+        if: github.ref == 'refs/heads/main'
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true
+
+      - name: Build report with history
+        run: |
+          if [ -d "gh-pages/history" ]; then
+            cp -r gh-pages/history target/allure-results/
+          fi
+          mvn allure:report
+
+      - name: Publish to GitHub Pages
+        if: github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: target/site/allure-maven-plugin
           destination_dir: allure-report
+          keep_files: false
+
+      - name: Add comment to PR with report link
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reportUrl = `https://${context.repo.owner}.github.io/${context.repo.repo}/allure-report/`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 📊 Test Report\n\nAllure report is available at: ${reportUrl}\n\n*This report is updated automatically.*`
+            });
+
+  # Performance tests
+  performance-tests:
+    needs: smoke-tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Install Playwright system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwoff1 libvpx9 libevent-2.1-7t64 libopus0 \
+            libgstreamer-plugins-base1.0-0 libgstreamer-gl1.0-0 \
+            libgstreamer-plugins-bad1.0-0 libflite1 libavif16 \
+            libharfbuzz-icu0 libsecret-1-0 libhyphen0 \
+            libmanette-0.2-0 libgles2 gstreamer1.0-libav
+
+      - name: Run performance tests (browsers install automatically)
+        run: mvn clean test -Dgroups=performance -Dheadless=true -DargLine=""
+
+      - name: Upload performance metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-metrics
+          path: target/performance-*.json
+          retention-days: 90
+
+  # Security scan
+  security-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Notification
+  notify:
+    needs: [full-tests, merge-reports]
+    runs-on: ubuntu-latest
+    if: always() && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Send Slack notification
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Test run completed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Playwright Tests - ${{ needs.full-tests.result }}*\n\nRun: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>\nReport: <https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/allure-report/|View Report>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
