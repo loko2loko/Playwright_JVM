@@ -1,0 +1,26 @@
+browsers:
+  chromium:
+    width: 1280
+    height: 720
+    mobile: false
+    displayName: "Desktop Chrome"
+  firefox:
+    width: 1280
+    height: 720
+    mobile: false
+    displayName: "Desktop Firefox"
+  webkit:
+    width: 1280
+    height: 720
+    mobile: false
+    displayName: "Desktop Safari"
+  mobile-chromium:
+    width: 393
+    height: 851
+    mobile: true
+    displayName: "Mobile Chrome"
+  mobile-webkit:
+    width: 390
+    height: 844
+    mobile: true
+    displayName: "Mobile Safari"
