@@ -23,7 +23,7 @@ jobs:
           cache: maven
 
       - name: Run tests (browsers install automatically on first run)
-        run: mvn clean test -Dheadless=true
+        run: mvn clean test -Dheadless=true -DargLine=""
         continue-on-error: true
 
       - name: Generate Allure report
